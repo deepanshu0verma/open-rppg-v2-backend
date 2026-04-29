@@ -46,6 +46,15 @@ def get_rr(y, sr=30):
     peak_freq = p[rr_band][np.argmax(q[rr_band])]
     return float(peak_freq * 60)
 
+@app.get("/api/health")
+async def health_check():
+    """
+    The frontend will call this repeatedly until it gets a 200 OK.
+    By the time this is reachable, the 'model = rppg.Model()' 
+    initialization is finished.
+    """
+    return {"status": "ready"}
+
 @app.post("/api/analyze")
 async def analyze(video: UploadFile = File(...)):
     start_time = time.time()

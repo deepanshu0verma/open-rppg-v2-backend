@@ -10,3 +10,7 @@ av>=13
 numpy
 torch
 torchvision
+sphinx
+sphinx-rtd-theme
+sphinx-intl
+myst-parser
