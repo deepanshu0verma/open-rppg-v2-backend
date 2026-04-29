@@ -7,7 +7,6 @@ import time
 import sys
 from scipy.signal import welch
 
-
 # Ensure Python can find your local rppg folder
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import rppg 
