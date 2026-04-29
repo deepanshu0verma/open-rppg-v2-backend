@@ -1,0 +1,23 @@
+venv/
+.venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.python-version
+
+# --- Environment & Secrets ---
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# --- Media & Temp Files ---
+*.webm
+*.mp4
+temp_*
+backend/api/temp_*
+.idea/
+.vscode/
