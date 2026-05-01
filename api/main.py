@@ -57,12 +57,8 @@ async def analyze(video: UploadFile = File(...)):
         ret, frame = cap.read()
         if not ret or frame is None: 
             break
-            
-        # --- IMPROVED FOREHEAD CROP ---
-        # We take a wider area (10% to 50% height) to ensure we catch 
-        # enough skin even if the user sways slightly.
         h, w, _ = frame.shape
-        forehead = frame[int(h*0.1):int(h*0.5), int(w*0.1):int(w*0.9)]
+        forehead = frame[int(h*0.05):int(h*0.6), int(w*0.05):int(w*0.95)]
         
         if forehead.size != 0:
             img = cv2.resize(forehead, (128, 128))

@@ -16,7 +16,7 @@ Uvicorn needs to know that the current directory is where api lives. Run it like
 export PYTHONPATH=$PYTHONPATH:.
 
 5. Install Required Libraries :
-pip install fastapi uvicorn python-multipart torch torchvision numpy opencv-python-headless jax jaxlib keras einops av heartpy onnxruntime scipy
+python3 -m pip install fastapi uvicorn python-multipart torch torchvision numpy opencv-python-headless jax jaxlib keras einops av heartpy onnxruntime scipy
 
 6. Launch the Backend Server :
 python3 -m uvicorn api.main:app --reload --port 8000 --host 0.0.0.0
