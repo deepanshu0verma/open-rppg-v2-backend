@@ -6,12 +6,15 @@ import os
 import time
 import sys
 from scipy.signal import welch
+from collections import deque
 
-# Ensure Python can find your local rppg folder
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import rppg 
+import rppg
 
 app = FastAPI()
+
+# Buffer to store ONLY high-quality readings for our aggregate
+bpm_history = deque(maxlen=12)
 
 app.add_middleware(
     CORSMiddleware,
@@ -20,13 +23,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize the rPPG model
 model = None
+face_cascade = cv2.CascadeClassifier(
+    cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+)
+
 
 @app.on_event("startup")
 async def startup_event():
     global model
     model = rppg.Model()
+
 
 def get_rr(y, sr=30):
     y_arr = np.array(y)
@@ -39,72 +46,109 @@ def get_rr(y, sr=30):
     peak_freq = p[rr_band][np.argmax(q[rr_band])]
     return float(peak_freq * 60)
 
+
 @app.get("/api/health")
 async def health_check():
     return {"status": "ready"}
 
+
 @app.post("/api/analyze")
 async def analyze(video: UploadFile = File(...)):
     start_time = time.time()
-    
+
     temp_path = f"temp_{int(time.time())}.webm"
     with open(temp_path, "wb") as f:
         f.write(await video.read())
 
     cap = cv2.VideoCapture(temp_path)
     frames = []
+    bbox = None
+
     while cap.isOpened():
         ret, frame = cap.read()
-        if not ret or frame is None: 
+        if not ret or frame is None:
             break
+
+        if bbox is None:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=3)
+
+            if len(faces) > 0:
+                x, y, w_face, h_face = faces[0]
+                # Keep the 15% margin to ensure full skin capture
+                margin_y, margin_x = int(h_face * 0.15), int(w_face * 0.15)
+                bbox = (
+                    max(0, x - margin_x),
+                    max(0, y - margin_y),
+                    w_face + (margin_x * 2),
+                    h_face + (margin_y * 2),
+                )
+            else:
+                continue
+
+        x, y, w_f, h_f = bbox
         h, w, _ = frame.shape
-        forehead = frame[int(h*0.05):int(h*0.6), int(w*0.05):int(w*0.95)]
-        
-        if forehead.size != 0:
-            img = cv2.resize(forehead, (128, 128))
+        roi = frame[y : min(y + h_f, h), x : min(x + w_f, w)]
+
+        if roi.size != 0 and roi.shape[0] > 0 and roi.shape[1] > 0:
+            img = cv2.resize(roi, (128, 128))
             frames.append(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
-            
+
     cap.release()
-    
     if os.path.exists(temp_path):
         os.remove(temp_path)
 
-    if len(frames) < 10:
-        return {"bpm": 0, "rr": 0, "latency": "0.0s", "quality": 0}
-
-    # 1. Run model inference
-    video_tensor = np.array(frames)
-    result = model.process_video_tensor(video_tensor) 
-    
-    # --- SAFETY: Handle None values from the model ---
-    hr_raw = result.get('hr')
-    sqi_raw = result.get('SQI')
-    
-    # Convert safely; if None, use 0
-    bpm = float(hr_raw) if hr_raw is not None else 0.0
-    quality = float(sqi_raw) if sqi_raw is not None else 0.0
-
-    # 2. Extract BVP for Respiratory Rate
-    bvp_signal, _ = model.bvp(raw=True)
-    calculated_rr = 0.0
-    if bvp_signal and len(bvp_signal) > 0:
-        calculated_rr = get_rr(bvp_signal, sr=model.fps)
-
-    total_latency = time.time() - start_time
-
-    face_box = None
-    if model.box is not None:
-        face_box = {
-            "ymin": int(model.box[0][0]),
-            "ymin_max": int(model.box[0][1]),
-            "xmin": int(model.box[1][0]),
-            "xmin_max": int(model.box[1][1])
+    if len(frames) < 30:
+        return {
+            "chunk_bpm": 0,
+            "aggregate_bpm": np.median(bpm_history) if bpm_history else 0,
+            "rr": 0,
+            "latency": f"{time.time() - start_time:.2f}s",
+            "quality": 0,
         }
 
+    video_tensor = np.array(frames)
+    result = model.process_video_tensor(video_tensor)
+
+    hr_raw, sqi_raw = result.get("hr"), result.get("SQI")
+
+    raw_bpm = float(hr_raw) if hr_raw is not None else 0.0
+    quality = float(sqi_raw) if sqi_raw is not None else 0.0
+
+    # ==========================================
+    # ENTERPRISE STABILITY ALGORITHM
+    # ==========================================
+    reported_chunk_bpm = raw_bpm
+
+    # 1. Quality Gate: If signal is garbage (< 20%), inherit last known good BPM
+    if quality < 0.20 and bpm_history:
+        reported_chunk_bpm = np.median(bpm_history)
+
+    # 2. Harmonic Rejection: Prevent the 41 BPM halving drop or 110 BPM spikes
+    if bpm_history:
+        current_median = np.median(bpm_history)
+        # If reading is weirdly low (halving) or weirdly high (spiking), reject it
+        if reported_chunk_bpm < (current_median * 0.65) or reported_chunk_bpm > (
+            current_median * 1.35
+        ):
+            reported_chunk_bpm = current_median
+
+    # 3. Add to History ONLY if the final logic deems it valid
+    if 40 < reported_chunk_bpm < 150:
+        bpm_history.append(reported_chunk_bpm)
+
+    running_aggregate = np.median(bpm_history) if bpm_history else reported_chunk_bpm
+
+    # Biomarker: Respiratory Rate
+    bvp_signal, _ = model.bvp(raw=True)
+    calculated_rr = (
+        get_rr(bvp_signal, sr=model.fps) if bvp_signal and len(bvp_signal) > 0 else 0.0
+    )
+
     return {
-        "bpm": round(bpm, 2),
+        "chunk_bpm": round(reported_chunk_bpm, 2),
+        "aggregate_bpm": round(running_aggregate, 2),
         "rr": round(float(calculated_rr), 2),
-        "latency": f"{total_latency:.2f}s",
-        "quality": round(quality, 2),
-        "box": face_box
+        "latency": f"{time.time() - start_time:.2f}s",
+        "quality": round(quality * 100, 1),
     }
